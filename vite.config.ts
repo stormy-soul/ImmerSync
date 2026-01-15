@@ -20,7 +20,7 @@ export default defineConfig({
         exports: 'default',
       },
     },
-    outDir: "dist/org.stormy.immer-sync",
+    outDir: "dist/me.stormy.immer-sync",
     emptyOutDir: true,
     minify: false, // Keep readable for debugging
   },

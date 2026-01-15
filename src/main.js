@@ -10,9 +10,10 @@ class BeatDetector {
         this.lastBeatTime = 0;
         this.MIN_BEAT_INTERVAL = 150;
         this.prevFreqData = null;
+        this.FFT_SIZE = 1024;
         this.BASS_MAX_HZ = 150;
         this.FLUX_MAX_HZ = 200;
-        this.SPECTRAL_FLUX_WEIGHT = 0.35; // 0.0 = only bass, 1.0 = only flux
+        this.SPECTRAL_FLUX_WEIGHT = 0.6;
         this.beatBuffer = [];
         this.LOOKAHEAD_MS = 100;
         this.onBeatCallback = null;
@@ -36,9 +37,6 @@ class BeatDetector {
                 const beatTime = now + this.LOOKAHEAD_MS;
                 this.beatBuffer.push(beatTime);
                 this.lastBeatTime = now;
-                //if (Math.random() < 0.15) {
-                //  console.log('[ImmerSync] Beat detected', { lowEnergy: lowEnergy.toFixed(3), flux: flux.toFixed(3), combined: combined.toFixed(3), avg: avgEnergy.toFixed(3) });
-                //}
             }
             this.rafId = requestAnimationFrame(this.detectBeats);
         };
@@ -55,7 +53,6 @@ class BeatDetector {
         this.onBeatCallback = onBeat;
     }
     async waitForCiderAudio() {
-        console.log('[ImmerSync] Waiting for CiderAudio to be fully ready...');
         for (let i = 0; i < 75; i++) {
             await new Promise(resolve => setTimeout(resolve, 200));
             const CA = window.CiderAudio;
@@ -63,11 +60,7 @@ class BeatDetector {
                 console.log('[ImmerSync] CiderAudio fully ready after', (i + 1) * 200, 'ms');
                 return CA;
             }
-            //if (i % 10 === 0 && i > 0) {
-            //  console.log(`[ImmerSync] Still waiting... (${i * 200}ms) - CiderAudio exists: ${!!CA}, has context: ${!!(CA?.context)}`);
-            //}
         }
-        //console.error('[ImmerSync] CiderAudio.context not ready after 15 seconds');
         return null;
     }
     async init() {
@@ -103,19 +96,16 @@ class BeatDetector {
                 }
             }
             this.analyser = this.audioContext.createAnalyser();
-            this.analyser.fftSize = 2048;
-            this.analyser.smoothingTimeConstant = 0.08;
+            this.analyser.fftSize = this.FFT_SIZE;
+            this.analyser.smoothingTimeConstant = 0.1;
             this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
             this.prevFreqData = new Uint8Array(this.analyser.frequencyBinCount);
             let sourceNode = CiderAudio.audioNodes?.gainNode ||
                 CiderAudio.source ||
                 CiderAudio.audioNodes?.spatialNode;
             if (!sourceNode) {
-                //console.error('[ImmerSync] Could not find a CiderAudio node to tap into');
-                //console.log('[ImmerSync] Available audioNodes:', Object.keys(CiderAudio.audioNodes || {}));
                 return false;
             }
-            //console.log('[ImmerSync] Tapping into CiderAudio node');
             sourceNode.connect(this.analyser);
             this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
             console.log('[ImmerSync] Audio analysis initialized successfully via CiderAudio');
@@ -128,10 +118,8 @@ class BeatDetector {
     }
     start() {
         if (!this.analyser || !this.dataArray) {
-            //console.error('[ImmerSync] Analyser not initialized');
             return;
         }
-        ///console.log('[ImmerSync] Starting beat detection');
         this.detectBeats();
         this.processBeats();
     }
@@ -140,7 +128,6 @@ class BeatDetector {
             cancelAnimationFrame(this.rafId);
             this.rafId = null;
         }
-        //console.log('[ImmerSync] Stopped beat detection');
     }
     calculateBassEnergy(frequencyData) {
         if (!this.analyser || !this.audioContext)
@@ -218,7 +205,6 @@ class ImmersiveEffects {
             const el = document.querySelector(selector);
             if (el) {
                 this.immersiveElement = el;
-                //console.log('[ImmerSync] Found immersive element:', selector);
                 this.cleanupWatcher();
                 return true;
             }
@@ -243,7 +229,6 @@ class ImmersiveEffects {
                 }
             }
             catch (e) {
-                //console.warn('[ImmerSync] Failed to attach MusicKit watcher:', e);
             }
         }
     }
@@ -260,7 +245,6 @@ class ImmersiveEffects {
             }
         }
         catch (e) {
-            //console.warn('[ImmerSync] Failed to create MutationObserver:', e);
         }
     }
     scheduleRetry() {
@@ -296,15 +280,12 @@ class ImmersiveEffects {
         const el = this.immersiveElement;
         const originalBackdropFilter = el.style.backdropFilter;
         const originalFilter = el.style.filter;
-        const originalTransform = el.style.transform;
         el.style.transition = 'backdrop-filter 50ms ease-out, -webkit-backdrop-filter 50ms ease-out, filter 50ms ease-out, transform 50ms ease-out';
         el.style.backdropFilter = 'brightness(1.08) saturate(1.2)';
-        el.style.transform = 'scale(1.002)';
         setTimeout(() => {
             el.style.transition = 'backdrop-filter 150ms ease-out, -webkit-backdrop-filter 150ms ease-out, filter 150ms ease-out, transform 150ms ease-out';
             el.style.backdropFilter = originalBackdropFilter;
             el.style.filter = originalFilter;
-            el.style.transform = originalTransform;
             setTimeout(() => {
                 el.style.transition = '';
                 this.isFlashing = false;
@@ -317,7 +298,7 @@ let immersiveEffects = null;
 let isEnabled = false;
 export default {
     id: "immer-sync",
-    identifier: "org.stormy.immer-sync",
+    identifier: "me.stormy.immer-sync",
     name: "ImmerSync",
     description: "Just syncs the song beats to the Immersive Background (Not the most accurate)",
     version: "1.0.0",

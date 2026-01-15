@@ -12,9 +12,10 @@ class BeatDetector {
   private readonly MIN_BEAT_INTERVAL = 150;
 
   private prevFreqData: Uint8Array | null = null;
+  private readonly FFT_SIZE = 1024;
   private readonly BASS_MAX_HZ = 150;    
   private readonly FLUX_MAX_HZ = 200;        
-  private readonly SPECTRAL_FLUX_WEIGHT = 0.35;   // 0.0 = only bass, 1.0 = only flux
+  private readonly SPECTRAL_FLUX_WEIGHT = 0.45;
 
   private beatBuffer: number[] = [];
   private readonly LOOKAHEAD_MS = 100;
@@ -25,9 +26,7 @@ class BeatDetector {
     this.onBeatCallback = onBeat;
   }
   
-  private async waitForCiderAudio(): Promise<any> {
-    console.log('[ImmerSync] Waiting for CiderAudio to be fully ready...');
-    
+  private async waitForCiderAudio(): Promise<any> {    
     for (let i = 0; i < 75; i++) {
       await new Promise(resolve => setTimeout(resolve, 200));
       
@@ -38,7 +37,6 @@ class BeatDetector {
       }
     }
     
-    //console.error('[ImmerSync] CiderAudio.context not ready after 15 seconds');
     return null;
   }
   
@@ -81,8 +79,8 @@ class BeatDetector {
       }
       
       this.analyser = this.audioContext.createAnalyser();
-      this.analyser.fftSize = 2048; 
-      this.analyser.smoothingTimeConstant = 0.08;
+      this.analyser.fftSize = this.FFT_SIZE; 
+      this.analyser.smoothingTimeConstant = 0.1;
 
       this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
       this.prevFreqData = new Uint8Array(this.analyser.frequencyBinCount);
@@ -96,7 +94,6 @@ class BeatDetector {
         return false;
       }
       
-      //console.log('[ImmerSync] Tapping into CiderAudio node');
       sourceNode.connect(this.analyser);
       
       this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
@@ -343,7 +340,7 @@ class ImmersiveEffects {
     const originalFilter = el.style.filter;
 
     el.style.transition = 'backdrop-filter 50ms ease-out, -webkit-backdrop-filter 50ms ease-out, filter 50ms ease-out, transform 50ms ease-out';
-    el.style.backdropFilter = 'brightness(1.08) saturate(1.2) contrast(1.06)';
+    el.style.backdropFilter = 'brightness(1.08) saturate(1.2)';
 
     setTimeout(() => {
       el.style.transition = 'backdrop-filter 150ms ease-out, -webkit-backdrop-filter 150ms ease-out, filter 150ms ease-out, transform 150ms ease-out';
@@ -364,7 +361,7 @@ let isEnabled = false;
 
 export default {
   id: "immer-sync",
-  identifier: "org.stormy.immer-sync",
+  identifier: "me.stormy.immer-sync",
   name: "ImmerSync",
   description: "Just syncs the song beats to the Immersive Background (Not the most accurate)",
   version: "1.0.0",

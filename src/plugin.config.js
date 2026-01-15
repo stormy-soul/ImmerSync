@@ -1,7 +1,7 @@
 import { createId } from '@paralleldrive/cuid2';
 export default {
     ce_prefix: createId(),
-    identifier: 'org.stormy.immer-sync',
+    identifier: 'me.stormy.immer-sync',
     name: 'ImmerSync',
     description: 'Just syncs the song beats to the Immersive Background (Not the most accurate)',
     version: '1.0.0',
