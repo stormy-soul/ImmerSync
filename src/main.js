@@ -13,7 +13,7 @@ class BeatDetector {
         this.FFT_SIZE = 1024;
         this.BASS_MAX_HZ = 150;
         this.FLUX_MAX_HZ = 200;
-        this.SPECTRAL_FLUX_WEIGHT = 0.6;
+        this.SPECTRAL_FLUX_WEIGHT = 0.3;
         this.beatBuffer = [];
         this.LOOKAHEAD_MS = 100;
         this.onBeatCallback = null;

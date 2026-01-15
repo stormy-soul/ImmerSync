@@ -15,7 +15,7 @@ class BeatDetector {
   private readonly FFT_SIZE = 1024;
   private readonly BASS_MAX_HZ = 150;    
   private readonly FLUX_MAX_HZ = 200;        
-  private readonly SPECTRAL_FLUX_WEIGHT = 0.45;
+  private readonly SPECTRAL_FLUX_WEIGHT = 0.3;
 
   private beatBuffer: number[] = [];
   private readonly LOOKAHEAD_MS = 100;
