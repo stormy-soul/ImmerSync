@@ -1,26 +1,34 @@
-
 class BeatDetector {
   private audioContext: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
   private dataArray: Uint8Array | null = null;
   private rafId: number | null = null;
   
-  private readonly BASS_THRESHOLD = 0.10;
-  private readonly ENERGY_HISTORY_SIZE = 43;
-  private energyHistory: number[] = [];
+  private readonly FFT_SIZE = 2048; 
+  private readonly KICK_MIN_HZ = 40;
+  private readonly KICK_MAX_HZ = 120; 
+  private readonly BASS_MIN_HZ = 120;
+  private readonly BASS_MAX_HZ = 250;
+  
+  private readonly MIN_KICK_THRESHOLD = 0.15; 
+
+  private readonly THRESHOLD_MULTIPLIER = 1.5; 
+
+  private readonly MIN_BEAT_INTERVAL = 250; 
   private lastBeatTime = 0;
-  private readonly MIN_BEAT_INTERVAL = 150;
-
-  private prevFreqData: Uint8Array | null = null;
-  private readonly FFT_SIZE = 1024;
-  private readonly BASS_MAX_HZ = 150;    
-  private readonly FLUX_MAX_HZ = 200;        
-  private readonly SPECTRAL_FLUX_WEIGHT = 0.3;
-
+  
+  private readonly HISTORY_SIZE = 30;
+  private kickHistory: number[] = [];
+  
+  private prevKickEnergy = 0;
+  private prevBassEnergy = 0;
+  
   private beatBuffer: number[] = [];
-  private readonly LOOKAHEAD_MS = 100;
+  private readonly LOOKAHEAD_MS = 100; \
   
   private onBeatCallback: (() => void) | null = null;
+  
+  private readonly ENABLE_DEBUG_LOGS = true;
   
   constructor(onBeat: () => void) {
     this.onBeatCallback = onBeat;
@@ -29,88 +37,48 @@ class BeatDetector {
   private async waitForCiderAudio(): Promise<any> {    
     for (let i = 0; i < 75; i++) {
       await new Promise(resolve => setTimeout(resolve, 200));
-      
       const CA = (window as any).CiderAudio;
-      if (CA && CA.context) {
-        console.log('[ImmerSync] CiderAudio fully ready after', (i + 1) * 200, 'ms');
-        return CA;
-      }
+      if (CA && CA.context) return CA;
     }
-    
     return null;
   }
   
   async init(): Promise<boolean> {
     try {
       const CiderAudio = await this.waitForCiderAudio();
-      
-      if (!CiderAudio) {
-        console.error('[ImmerSync] CiderAudio not available after waiting');
-        return false;
-      }
-      
-      console.log('[ImmerSync] CiderAudio found:', {
-        hasCiderAudio: !!CiderAudio,
-        hasContext: !!CiderAudio.context,
-        hasAudioNodes: !!CiderAudio.audioNodes,
-        audioNodeKeys: CiderAudio.audioNodes ? Object.keys(CiderAudio.audioNodes) : []
-      });
+      if (!CiderAudio?.context) return false;
       
       this.audioContext = CiderAudio.context;
       
-      if (!this.audioContext) {
-        console.error('[ImmerSync] CiderAudio.context is null or undefined');
-        console.error('[ImmerSync] CiderAudio object:', CiderAudio);
-        return false;
-      }
-      
-      console.log('[ImmerSync] Using CiderAudio context:', {
-        state: this.audioContext.state,
-        sampleRate: this.audioContext.sampleRate
-      });
-      
-      if (this.audioContext.state === 'suspended') {
-        try {
-          await this.audioContext.resume();
-          console.log('[ImmerSync] Resumed audio context');
-        } catch (e) {
-          console.warn('[ImmerSync] Could not resume context:', e);
-        }
-      }
-      
       this.analyser = this.audioContext.createAnalyser();
       this.analyser.fftSize = this.FFT_SIZE; 
-      this.analyser.smoothingTimeConstant = 0.1;
-
-      this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-      this.prevFreqData = new Uint8Array(this.analyser.frequencyBinCount);
-
       
-      let sourceNode = CiderAudio.audioNodes?.gainNode || 
-                       CiderAudio.source ||
-                       CiderAudio.audioNodes?.spatialNode;
+      this.analyser.smoothingTimeConstant = 0.15; 
       
-      if (!sourceNode) {
-        return false;
-      }
+      const sourceNode = CiderAudio.audioNodes?.gainNode || 
+                        CiderAudio.source ||
+                        CiderAudio.audioNodes?.spatialNode;
+      
+      if (!sourceNode) return false;
       
       sourceNode.connect(this.analyser);
-      
       this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
       
-      console.log('[ImmerSync] Audio analysis initialized successfully via CiderAudio');
       return true;
     } catch (error) {
-      console.error('[ImmerSync] Failed to initialize audio:', error);
+      console.error('[ImmerSync] Init failed:', error);
       return false;
     }
   }
   
   start() {
+    if (this.rafId) return; 
     if (!this.analyser || !this.dataArray) {
+      this.init().then(success => {
+        if(success) this.detectBeats();
+      });
       return;
     }
-    
     this.detectBeats();
     this.processBeats();
   }
@@ -123,115 +91,91 @@ class BeatDetector {
   }
   
   private detectBeats = () => {
-    if (!this.analyser || !this.dataArray) return;
-
+    if (!this.analyser || !this.dataArray) {
+      this.rafId = requestAnimationFrame(this.detectBeats);
+      return;
+    }
+    
     this.analyser.getByteFrequencyData(
       this.dataArray as Uint8Array<ArrayBuffer>
-    );
-    const lowEnergy = this.calculateBassEnergy(this.dataArray as Uint8Array);
-    const flux = this.calculateSpectralFlux(this.dataArray as Uint8Array);
-
-    const combined = (this.SPECTRAL_FLUX_WEIGHT * flux) + ((1 - this.SPECTRAL_FLUX_WEIGHT) * lowEnergy);
-
-    this.energyHistory.push(combined);
-    if (this.energyHistory.length > this.ENERGY_HISTORY_SIZE) {
-      this.energyHistory.shift();
+    );    
+    const kickEnergy = this.getFrequencyRangeEnergy(this.KICK_MIN_HZ, this.KICK_MAX_HZ);
+    const bassEnergy = this.getFrequencyRangeEnergy(this.BASS_MIN_HZ, this.BASS_MAX_HZ);
+    
+    const kickImpulse = Math.max(0, kickEnergy - this.prevKickEnergy);
+    const bassImpulse = Math.max(0, bassEnergy - this.prevBassEnergy);
+    
+    this.prevKickEnergy = kickEnergy;
+    this.prevBassEnergy = bassEnergy;
+    
+    this.kickHistory.push(kickImpulse);
+    if (this.kickHistory.length > this.HISTORY_SIZE) this.kickHistory.shift();
+    
+    if (this.kickHistory.length < this.HISTORY_SIZE) {
+      this.rafId = requestAnimationFrame(this.detectBeats);
+      return;
     }
-
-    const avgEnergy = this.energyHistory.reduce((a,b) => a + b, 0) / this.energyHistory.length;
-
-    const variance = this.energyHistory.reduce((sum, val) => sum + Math.pow(val - avgEnergy, 2), 0) / this.energyHistory.length;
-    const adaptiveThreshold = variance > 0.0005 ? this.BASS_THRESHOLD * 0.9 : this.BASS_THRESHOLD;
+    
+    const avgImpulse = this.kickHistory.reduce((a, b) => a + b, 0) / this.kickHistory.length;
+    
+    const dynamicThreshold = Math.max(
+      this.MIN_KICK_THRESHOLD, 
+      avgImpulse * this.THRESHOLD_MULTIPLIER
+    );
 
     const now = performance.now();
     const timeSinceLastBeat = now - this.lastBeatTime;
+    
+    const isKickDominant = kickImpulse > (bassImpulse * 1.1); 
+    const isAboveThreshold = kickImpulse > dynamicThreshold;
+    const isTimingReady = timeSinceLastBeat > this.MIN_BEAT_INTERVAL;
 
-    if (combined > avgEnergy * (1 + adaptiveThreshold) && timeSinceLastBeat > this.MIN_BEAT_INTERVAL) {
+    if (isAboveThreshold && isKickDominant && isTimingReady) {
+      
       const beatTime = now + this.LOOKAHEAD_MS;
       this.beatBuffer.push(beatTime);
       this.lastBeatTime = now;
+      
+      if (this.ENABLE_DEBUG_LOGS) {
+        console.log(`[ImmerSync] Hit! [ Force: ${kickImpulse.toFixed(2)} | Threshold: ${dynamicThreshold.toFixed(2)} ]`);
+      }
     }
-
+    
     this.rafId = requestAnimationFrame(this.detectBeats);
   }
   
-  private calculateBassEnergy(frequencyData: Uint8Array): number {
-    if (!this.analyser || !this.audioContext) return 0;
-
-    const sampleRate = this.audioContext.sampleRate || 44100;
-    const binWidth = sampleRate / this.analyser.fftSize; 
-
-    const maxBin = Math.min(
-      Math.floor(this.BASS_MAX_HZ / binWidth),
-      frequencyData.length - 1
-    );
-
-    if (maxBin < 1) return 0;
-
-    let sum = 0;
-    for (let i = 0; i <= maxBin; i++) {
-      sum += frequencyData[i];
-    }
-
-    const normalized = sum / ((maxBin + 1) * 255);
-    return normalized;
-  }
-
-  private calculateSpectralFlux(frequencyData: Uint8Array): number {
-    if (!this.prevFreqData) {
-      this.prevFreqData = new Uint8Array(frequencyData.length);
-      return 0;
-    }
-
-    if (!this.analyser || !this.audioContext) return 0;
-
-    const sampleRate = this.audioContext.sampleRate || 44100;
+  private getFrequencyRangeEnergy(minHz: number, maxHz: number): number {
+    if (!this.analyser || !this.dataArray) return 0;
+    
+    const sampleRate = this.audioContext?.sampleRate || 44100;
     const binWidth = sampleRate / this.analyser.fftSize;
     
-    const maxBin = Math.min(
-      Math.floor(this.FLUX_MAX_HZ / binWidth),
-      frequencyData.length - 1
-    );
-
-    let flux = 0;
-    for (let i = 0; i <= maxBin; i++) {
-      const diff = frequencyData[i] - this.prevFreqData[i];
-      if (diff > 0) {
-        flux += diff;
-      }
+    const minBin = Math.floor(minHz / binWidth);
+    const maxBin = Math.min(Math.floor(maxHz / binWidth), this.dataArray.length - 1);
+    
+    if (minBin >= maxBin) return 0;
+    
+    let sum = 0;
+    for (let i = minBin; i <= maxBin; i++) {
+      sum += this.dataArray[i];
     }
-
-    this.prevFreqData.set(frequencyData);
-
-    const normalized = flux / ((maxBin + 1) * 255);
-    return normalized;
+    
+    return sum / ((maxBin - minBin + 1) * 255);
   }
-
   
   private processBeats = () => {
     const now = performance.now();
-    
     while (this.beatBuffer.length > 0 && this.beatBuffer[0] <= now) {
       this.beatBuffer.shift();
-      
-      if (this.onBeatCallback) {
-        this.onBeatCallback();
-      }
+      this.onBeatCallback?.();
     }
-    
     requestAnimationFrame(this.processBeats);
   }
-  
+
   cleanup() {
     this.stop();
-    // Don't close the context - it belongs to Cider!
-    if (this.analyser) {
-      try {
-        this.analyser.disconnect();
-      } catch (e) {
-      }
-      this.analyser = null;
-    }
+    this.analyser?.disconnect();
+    this.analyser = null;
     this.audioContext = null;
   }
 }
@@ -338,14 +282,17 @@ class ImmersiveEffects {
     
     const originalBackdropFilter = el.style.backdropFilter;
     const originalFilter = el.style.filter;
+    //const originalTransform = el.style.transform;
 
-    el.style.transition = 'backdrop-filter 50ms ease-out, -webkit-backdrop-filter 50ms ease-out, filter 50ms ease-out, transform 50ms ease-out';
-    el.style.backdropFilter = 'brightness(1.08) saturate(1.2)';
+    el.style.transition = 'backdrop-filter 50ms ease-out, -webkit-backdrop-filter 50ms ease-out, transform 50ms ease-out';
+    el.style.backdropFilter = 'brightness(1.08) saturate(1.1)';
+    //el.style.transform = 'scale(1.002)';
 
     setTimeout(() => {
-      el.style.transition = 'backdrop-filter 150ms ease-out, -webkit-backdrop-filter 150ms ease-out, filter 150ms ease-out, transform 150ms ease-out';
+      el.style.transition = 'backdrop-filter 150ms ease-out, -webkit-backdrop-filter 150ms ease-out, transform 150ms ease-out';
       el.style.backdropFilter = originalBackdropFilter;
       el.style.filter = originalFilter;
+      //el.style.transform = originalTransform;
       
       setTimeout(() => {
         el.style.transition = '';

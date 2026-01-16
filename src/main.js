@@ -4,39 +4,76 @@ class BeatDetector {
         this.analyser = null;
         this.dataArray = null;
         this.rafId = null;
-        this.BASS_THRESHOLD = 0.10;
-        this.ENERGY_HISTORY_SIZE = 43;
-        this.energyHistory = [];
+        // Audio configuration
+        this.FFT_SIZE = 2048; // 2048 is usually snappier than 4096 for timing
+        this.KICK_MIN_HZ = 40;
+        this.KICK_MAX_HZ = 120; // Tightened to focus on the "thud"
+        this.BASS_MIN_HZ = 120;
+        this.BASS_MAX_HZ = 250;
+        // 1. HARD FLOOR: Beats must be at least this strong (0.0 - 1.0)
+        // This filters out the "0.047", "0.010" noise in your logs.
+        this.MIN_KICK_THRESHOLD = 0.18;
+        // 2. DYNAMIC SENSITIVITY: How much louder than the average?
+        this.THRESHOLD_MULTIPLIER = 1.5;
+        this.MIN_BEAT_INTERVAL = 250; // ms
         this.lastBeatTime = 0;
-        this.MIN_BEAT_INTERVAL = 150;
-        this.prevFreqData = null;
-        this.FFT_SIZE = 1024;
-        this.BASS_MAX_HZ = 150;
-        this.FLUX_MAX_HZ = 200;
-        this.SPECTRAL_FLUX_WEIGHT = 0.3;
+        // History
+        this.HISTORY_SIZE = 30; // Shorter history adapts faster to drops
+        this.kickHistory = [];
+        // Previous frame data
+        this.prevKickEnergy = 0;
+        this.prevBassEnergy = 0;
+        // Buffer
         this.beatBuffer = [];
-        this.LOOKAHEAD_MS = 100;
+        this.LOOKAHEAD_MS = 100; // Lowered slightly for tighter sync
         this.onBeatCallback = null;
+        // Debug
+        this.ENABLE_DEBUG_LOGS = true;
         this.detectBeats = () => {
-            if (!this.analyser || !this.dataArray)
+            // 1. Safety Check: Restart loop if analyser is missing (don't return!)
+            if (!this.analyser || !this.dataArray) {
+                this.rafId = requestAnimationFrame(this.detectBeats);
                 return;
-            this.analyser.getByteFrequencyData(this.dataArray);
-            const lowEnergy = this.calculateBassEnergy(this.dataArray);
-            const flux = this.calculateSpectralFlux(this.dataArray);
-            const combined = (this.SPECTRAL_FLUX_WEIGHT * flux) + ((1 - this.SPECTRAL_FLUX_WEIGHT) * lowEnergy);
-            this.energyHistory.push(combined);
-            if (this.energyHistory.length > this.ENERGY_HISTORY_SIZE) {
-                this.energyHistory.shift();
             }
-            const avgEnergy = this.energyHistory.reduce((a, b) => a + b, 0) / this.energyHistory.length;
-            const variance = this.energyHistory.reduce((sum, val) => sum + Math.pow(val - avgEnergy, 2), 0) / this.energyHistory.length;
-            const adaptiveThreshold = variance > 0.0005 ? this.BASS_THRESHOLD * 0.9 : this.BASS_THRESHOLD;
+            this.analyser.getByteFrequencyData(this.dataArray);
+            // 2. Get Energy
+            const kickEnergy = this.getFrequencyRangeEnergy(this.KICK_MIN_HZ, this.KICK_MAX_HZ);
+            const bassEnergy = this.getFrequencyRangeEnergy(this.BASS_MIN_HZ, this.BASS_MAX_HZ);
+            // 3. Calculate Impulse (The "Hit")
+            // Simple difference from last frame
+            const kickImpulse = Math.max(0, kickEnergy - this.prevKickEnergy);
+            const bassImpulse = Math.max(0, bassEnergy - this.prevBassEnergy);
+            // Store for next frame
+            this.prevKickEnergy = kickEnergy;
+            this.prevBassEnergy = bassEnergy;
+            // 4. Update Average History
+            this.kickHistory.push(kickImpulse);
+            if (this.kickHistory.length > this.HISTORY_SIZE)
+                this.kickHistory.shift();
+            // Wait for history to fill
+            if (this.kickHistory.length < this.HISTORY_SIZE) {
+                this.rafId = requestAnimationFrame(this.detectBeats);
+                return;
+            }
+            // 5. Dynamic Threshold Calculation
+            const avgImpulse = this.kickHistory.reduce((a, b) => a + b, 0) / this.kickHistory.length;
+            // The Threshold is the average energy * multiplier
+            // BUT we enforce a minimum floor (Math.max)
+            const dynamicThreshold = Math.max(this.MIN_KICK_THRESHOLD, avgImpulse * this.THRESHOLD_MULTIPLIER);
             const now = performance.now();
             const timeSinceLastBeat = now - this.lastBeatTime;
-            if (combined > avgEnergy * (1 + adaptiveThreshold) && timeSinceLastBeat > this.MIN_BEAT_INTERVAL) {
+            // 6. Beat Detection Logic
+            // We strictly check kickImpulse vs bassImpulse to ensure it's a "thud" not a "hum"
+            const isKickDominant = kickImpulse > (bassImpulse * 1.1);
+            const isAboveThreshold = kickImpulse > dynamicThreshold;
+            const isTimingReady = timeSinceLastBeat > this.MIN_BEAT_INTERVAL;
+            if (isAboveThreshold && isKickDominant && isTimingReady) {
                 const beatTime = now + this.LOOKAHEAD_MS;
                 this.beatBuffer.push(beatTime);
                 this.lastBeatTime = now;
+                if (this.ENABLE_DEBUG_LOGS) {
+                    console.log(`[ImmerSync] 🥁 BEAT | Force: ${kickImpulse.toFixed(2)} | Threshold: ${dynamicThreshold.toFixed(2)}`);
+                }
             }
             this.rafId = requestAnimationFrame(this.detectBeats);
         };
@@ -44,9 +81,7 @@ class BeatDetector {
             const now = performance.now();
             while (this.beatBuffer.length > 0 && this.beatBuffer[0] <= now) {
                 this.beatBuffer.shift();
-                if (this.onBeatCallback) {
-                    this.onBeatCallback();
-                }
+                this.onBeatCallback?.();
             }
             requestAnimationFrame(this.processBeats);
         };
@@ -56,68 +91,45 @@ class BeatDetector {
         for (let i = 0; i < 75; i++) {
             await new Promise(resolve => setTimeout(resolve, 200));
             const CA = window.CiderAudio;
-            if (CA && CA.context) {
-                console.log('[ImmerSync] CiderAudio fully ready after', (i + 1) * 200, 'ms');
+            if (CA && CA.context)
                 return CA;
-            }
         }
         return null;
     }
     async init() {
         try {
             const CiderAudio = await this.waitForCiderAudio();
-            if (!CiderAudio) {
-                console.error('[ImmerSync] CiderAudio not available after waiting');
+            if (!CiderAudio?.context)
                 return false;
-            }
-            console.log('[ImmerSync] CiderAudio found:', {
-                hasCiderAudio: !!CiderAudio,
-                hasContext: !!CiderAudio.context,
-                hasAudioNodes: !!CiderAudio.audioNodes,
-                audioNodeKeys: CiderAudio.audioNodes ? Object.keys(CiderAudio.audioNodes) : []
-            });
             this.audioContext = CiderAudio.context;
-            if (!this.audioContext) {
-                console.error('[ImmerSync] CiderAudio.context is null or undefined');
-                console.error('[ImmerSync] CiderAudio object:', CiderAudio);
-                return false;
-            }
-            console.log('[ImmerSync] Using CiderAudio context:', {
-                state: this.audioContext.state,
-                sampleRate: this.audioContext.sampleRate
-            });
-            if (this.audioContext.state === 'suspended') {
-                try {
-                    await this.audioContext.resume();
-                    console.log('[ImmerSync] Resumed audio context');
-                }
-                catch (e) {
-                    console.warn('[ImmerSync] Could not resume context:', e);
-                }
-            }
             this.analyser = this.audioContext.createAnalyser();
             this.analyser.fftSize = this.FFT_SIZE;
-            this.analyser.smoothingTimeConstant = 0.1;
-            this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-            this.prevFreqData = new Uint8Array(this.analyser.frequencyBinCount);
-            let sourceNode = CiderAudio.audioNodes?.gainNode ||
+            // CRITICAL: Lower smoothing means faster reaction to drums
+            // 0.8 = slow/smooth, 0.1 = twitchy/fast. 0.15 is a sweet spot for beats.
+            this.analyser.smoothingTimeConstant = 0.15;
+            const sourceNode = CiderAudio.audioNodes?.gainNode ||
                 CiderAudio.source ||
                 CiderAudio.audioNodes?.spatialNode;
-            if (!sourceNode) {
+            if (!sourceNode)
                 return false;
-            }
             sourceNode.connect(this.analyser);
             this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-            console.log('[ImmerSync] Audio analysis initialized successfully via CiderAudio');
             return true;
         }
         catch (error) {
-            console.error('[ImmerSync] Failed to initialize audio:', error);
+            console.error('[ImmerSync] Init failed:', error);
             return false;
         }
     }
     start() {
+        if (this.rafId)
+            return; // Prevent double loops
         if (!this.analyser || !this.dataArray) {
+            // Auto-recover if possible
+            this.init().then(success => {
+                if (success)
+                    this.detectBeats();
+            });
             return;
         }
         this.detectBeats();
@@ -129,53 +141,26 @@ class BeatDetector {
             this.rafId = null;
         }
     }
-    calculateBassEnergy(frequencyData) {
-        if (!this.analyser || !this.audioContext)
+    getFrequencyRangeEnergy(minHz, maxHz) {
+        if (!this.analyser || !this.dataArray)
             return 0;
-        const sampleRate = this.audioContext.sampleRate || 44100;
+        const sampleRate = this.audioContext?.sampleRate || 44100;
         const binWidth = sampleRate / this.analyser.fftSize;
-        const maxBin = Math.min(Math.floor(this.BASS_MAX_HZ / binWidth), frequencyData.length - 1);
-        if (maxBin < 1)
+        const minBin = Math.floor(minHz / binWidth);
+        const maxBin = Math.min(Math.floor(maxHz / binWidth), this.dataArray.length - 1);
+        if (minBin >= maxBin)
             return 0;
         let sum = 0;
-        for (let i = 0; i <= maxBin; i++) {
-            sum += frequencyData[i];
+        for (let i = minBin; i <= maxBin; i++) {
+            sum += this.dataArray[i];
         }
-        const normalized = sum / ((maxBin + 1) * 255);
-        return normalized;
-    }
-    calculateSpectralFlux(frequencyData) {
-        if (!this.prevFreqData) {
-            this.prevFreqData = new Uint8Array(frequencyData.length);
-            return 0;
-        }
-        if (!this.analyser || !this.audioContext)
-            return 0;
-        const sampleRate = this.audioContext.sampleRate || 44100;
-        const binWidth = sampleRate / this.analyser.fftSize;
-        const maxBin = Math.min(Math.floor(this.FLUX_MAX_HZ / binWidth), frequencyData.length - 1);
-        let flux = 0;
-        for (let i = 0; i <= maxBin; i++) {
-            const diff = frequencyData[i] - this.prevFreqData[i];
-            if (diff > 0) {
-                flux += diff;
-            }
-        }
-        this.prevFreqData.set(frequencyData);
-        const normalized = flux / ((maxBin + 1) * 255);
-        return normalized;
+        // Normalize to 0.0 - 1.0
+        return sum / ((maxBin - minBin + 1) * 255);
     }
     cleanup() {
         this.stop();
-        // Don't close the context - it belongs to Cider!
-        if (this.analyser) {
-            try {
-                this.analyser.disconnect();
-            }
-            catch (e) {
-            }
-            this.analyser = null;
-        }
+        this.analyser?.disconnect();
+        this.analyser = null;
         this.audioContext = null;
     }
 }
@@ -280,12 +265,15 @@ class ImmersiveEffects {
         const el = this.immersiveElement;
         const originalBackdropFilter = el.style.backdropFilter;
         const originalFilter = el.style.filter;
-        el.style.transition = 'backdrop-filter 50ms ease-out, -webkit-backdrop-filter 50ms ease-out, filter 50ms ease-out, transform 50ms ease-out';
-        el.style.backdropFilter = 'brightness(1.08) saturate(1.2)';
+        //const originalTransform = el.style.transform;
+        el.style.transition = 'backdrop-filter 50ms ease-out, -webkit-backdrop-filter 50ms ease-out, transform 50ms ease-out';
+        el.style.backdropFilter = 'brightness(1.08) saturate(1.1)';
+        //el.style.transform = 'scale(1.002)';
         setTimeout(() => {
-            el.style.transition = 'backdrop-filter 150ms ease-out, -webkit-backdrop-filter 150ms ease-out, filter 150ms ease-out, transform 150ms ease-out';
+            el.style.transition = 'backdrop-filter 150ms ease-out, -webkit-backdrop-filter 150ms ease-out, transform 150ms ease-out';
             el.style.backdropFilter = originalBackdropFilter;
             el.style.filter = originalFilter;
+            //el.style.transform = originalTransform;
             setTimeout(() => {
                 el.style.transition = '';
                 this.isFlashing = false;
