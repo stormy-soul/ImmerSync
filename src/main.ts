@@ -24,7 +24,7 @@ class BeatDetector {
   private prevBassEnergy = 0;
   
   private beatBuffer: number[] = [];
-  private readonly LOOKAHEAD_MS = 100; \
+  private readonly LOOKAHEAD_MS = 100;
   
   private onBeatCallback: (() => void) | null = null;
   
